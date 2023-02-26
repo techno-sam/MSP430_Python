@@ -670,7 +670,13 @@ for emulated_instruction in emulated_instructions.split("\n"):
     e(*emulated_instruction.split("\t"))
 
 
-def parse(lines_text: str):
+def u16_to_bytes(i: int) -> bytes:
+    high = (i >> 8) & 0xFF
+    low = i & 0xFF
+    return bytes([low, high])
+
+
+def parse(lines_text: str) -> bytes:
     lines = lines_text.split("\n")
     lines = [clean_up_comments(line) for line in lines]
     lines = [line.strip() for line in lines]
@@ -738,6 +744,7 @@ def parse(lines_text: str):
 #        print(f"{i*2:04x}: ", end="")
 #        bin_str = bytearray_to_bin_str(byte_array)
 #        print(f"{bin_str} (0x{int(bin_str, 2):04x})")
+    bytes_out = b""
     for pc, instr in instrs:
         print(f"{pc:04x}:  ", end="")
         words = instr.get_words()
@@ -750,20 +757,27 @@ def parse(lines_text: str):
                 print(" "*5, end="")
         else:
             print(" "*10, end="")
+        bytes_out += b"".join([u16_to_bytes(to_int(word)) for word in words])
         print(instr.get_mnemonic().lower().ljust(12, " "), end="")
         print(instr.get_args())
+    return bytes_out
 
 
 
-parse("""
+dat = parse("""
 .define "R6", Test$Macro_1
 AdD #10 Test$Macro_1 ;comment
 ; a comment
   ; more comments
+; test weird upper+lowercase mixtures
 CmP #11 0(R10)
 JmP -0x8
 PUsH.b @R5
+; test emulated instructions
 DINT
 tst.B R10
 POP 0(R11)
 """)
+
+with open("test.bin", "wb") as f:
+    f.write(dat)
