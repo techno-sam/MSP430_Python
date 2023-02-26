@@ -1,0 +1,45 @@
+MSP430 based system emulator (https://en.wikipedia.org/wiki/TI_MSP430)
+
+16 16-bit registers:
+
+R0 - PC (Program Counter)
+R1 - SP (Stack Pointer)
+R2 - SR (Status Register)
+R3 - CG (Constant Generator)
+
+Address Space:
+0x0000 - 0x0007: Interrupts - don't worry about it
+
+0x0008 - 0x00FF: 8-bit peripherals. 8-bit loads and stores required
+0x0100 - 0x01FF: 16-bit peripherals. 16-bit loads and stores required
+
+0x0200 - 0xFFFF: RAM
+
+recommend 0x0200 - 0x4400 dedicated to call stack
+
+directives, labels, and comments:
+
+A line is ignored starting with the first ;
+
+A label may use these characters (but may not start with a number): (A-Z, a-z, 0-9, $, and _), and the end of a label is denoted by :
+  a label can be on a line by itself, in which case it won't increase the address counter, or at the start of a line.
+  in final assembly, references to labels will be replaced with the address of the line they reference (allows creating named functions)
+
+a symbol can be defined using the syntax
+  .define "R5", AMacro0_$1_is_cool
+  .define "ADD", SomeOtherMacro
+  in final assembly, references to symbols will be replaced with their contents (this step takes place before labels)
+  so the line:
+    SomeOtherMacro #10 AMacro0_$1_is_cool
+  would equate to
+    ADD #10 R5
+
+steps:
+  1. Remove comments
+  2. Remove blank lines
+  3. load & apply defines
+  4. load instructions
+  5. load emulated instructions
+  6. load labels
+  7. apply labels
+  8. bytecode
