@@ -844,6 +844,7 @@ def parse(lines_text: str, start_pc: int = 0, log_level: int = 1) -> bytes:
 
 
 dat = parse("""
+MOV #0x4400, SP
 .define "R6", Test$Macro_1
 AdD #10 Test$Macro_1 ;comment
 ; a comment
