@@ -2,8 +2,8 @@
 # Misc #
 ########
 UNSIGNED_NUMBER = r"^(?:(?:0[xX](?P<hex>[0-9a-fA-F]{1,4}))|(?P<digits>\d+))$"
-SIGN = r"(?P<sign>[-+]?)"
-
+SIGN = r"(?P<sign>[-+])?"
+LABEL = r"^([A-z$_][A-z0-9$_]*)$"
 
 #############
 # Registers #
@@ -24,8 +24,8 @@ REGISTER_IMMEDIATE = r"^#"+SIGN+r"(?:(?:0[xX](?P<hex>[0-9a-fA-F]{1,4}))|(?P<digi
 ################
 # Instructions #
 ################
-INST_DOUBLE_OPERAND = r"^(?P<opcode>[a-zA-Z]+)(?P<byte_mode>\.[BbWw])?(?:\s+)(?P<operand_src>[#A-Za-z0-9@\(\)+]+)(?:(?:,\s*)|(?:\s+))(?P<operand_dst>[#A-Za-z0-9@\(\)+]+)$"
-INST_SINGLE_OPERAND = r"^(?P<opcode>[a-zA-Z]+)(?P<byte_mode>\.[BbWw])?(?:\s+)(?P<operand_src>[#A-Za-z0-9@\(\)+]+)$"
+INST_DOUBLE_OPERAND = r"^(?P<opcode>[a-zA-Z]+)(?P<byte_mode>\.[BbWw])?(?:\s+)(?P<operand_src>[-#A-Za-z0-9@\(\)+]+)(?:(?:,\s*)|(?:\s+))(?P<operand_dst>[-#A-Za-z0-9@\(\)+]+)$"
+INST_SINGLE_OPERAND = r"^(?P<opcode>[a-zA-Z]+)(?P<byte_mode>\.[BbWw])?(?:\s+)(?P<operand_src>[-#A-Za-z0-9@\(\)+]+)$"
 INST_RETI = r"^RETI$"
 INST_JMP = r"^(?P<opcode>[a-zA-Z]+)(?:\s+)"+SIGN+r"(?:(?:0[xX](?P<hex>[0-9a-fA-F]{1,4}))|(?P<digits>\d+))$"
-INST_EMULATED = r"^(?P<opcode>[a-zA-Z]+)(?P<byte_mode>\.[BbWw])?((?:\s+)(?P<operand_src>[#A-Za-z0-9@\(\)+]+))?$"
+INST_EMULATED = r"^(?P<opcode>[a-zA-Z]+)(?P<byte_mode>\.[BbWw])?((?:\s+)(?P<operand_src>[-#A-Za-z0-9@\(\)+]+))?$"

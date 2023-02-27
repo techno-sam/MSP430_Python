@@ -7,6 +7,19 @@ except ImportError:
     Self = None
 from typing import Any
 import regexes
+try:
+    from colorama import Fore, Style
+except ImportError:
+    class Everything:
+        def __getattr__(self, item):
+            return ""
+
+        def __getattribute__(self, item):
+            return ""
+
+        def __setattr__(self, key, value):
+            pass
+    Fore = Style = Everything()
 
 
 def box_print(msg: str, right_char: str = "#", left_char: str = "#", top_char: str = "=", bottom_char: str = "="):
@@ -420,6 +433,7 @@ class JumpInstructionType(InstructionType):
                 raise AssemblyError("Invalid jump instruction")
             if sign == "-":
                 offset = -offset
+                orig_offset = "-" + orig_offset
             return JumpInstruction(JumpInstructionType.ALL[mnemonic], signed_bin(offset, 10), orig_mnemonic, orig_offset), program_counter
         else:
             raise WrongInstructionError("Invalid jump instruction")
@@ -676,7 +690,26 @@ def u16_to_bytes(i: int) -> bytes:
     return bytes([low, high])
 
 
-def parse(lines_text: str) -> bytes:
+def parse_line(line: str, program_counter: int) -> tuple[Instruction, int]:
+    try:
+        instr, program_counter = DoubleOperandInstructionType.parse(line, program_counter)
+    except WrongInstructionError as e1:
+        try:
+            instr, program_counter = SingleOperandInstructionType.parse(line, program_counter)
+        except WrongInstructionError as e2:
+            try:
+                instr, program_counter = JumpInstructionType.parse(line, program_counter)
+            except WrongInstructionError as e3:
+                try:
+                    instr, program_counter = EmulatedInstructionType.parse(line, program_counter)
+                except WrongInstructionError as e4:
+                    raise AssemblyError(
+                        f"Failed to parse instruction: {line}\nDoubleOperand: {e1}\nSingleOperand: {e2}\nJump: {e3}\nEmulated: {e4}")
+    return instr, program_counter
+
+
+def parse(lines_text: str, start_pc: int = 0, log_level: int = 1) -> bytes:
+    assert start_pc % 2 == 0
     lines = lines_text.split("\n")
     lines = [clean_up_comments(line) for line in lines]
     lines = [line.strip() for line in lines]
@@ -686,11 +719,20 @@ def parse(lines_text: str) -> bytes:
     lines = []
 
     defines = {}
+    preliminary_labels = []
     used_symbols = set()
 
     for line in old_lines:
         if ":" in line:
-            raise AssemblyError("Labels are not yet supported")
+            key = line.split(":")[0].strip()
+            if key == "":
+                raise InvalidDirectiveError("Empty label")
+            if key in used_symbols or key.upper() in instructions:
+                raise InvalidDirectiveError(f"Illegal or redefined label [{key}]")
+            if not re.findall(regexes.LABEL, key):
+                raise InvalidDirectiveError(f"Invalid label [{key}]")
+            used_symbols.add(key)
+            preliminary_labels.append(key)
         if line[0] == ".":
             line = line[1:]
             if line.startswith("define"):
@@ -707,35 +749,69 @@ def parse(lines_text: str) -> bytes:
             else:
                 raise InvalidDirectiveError
         else:
+            define_keys = list(defines.keys())
+            define_keys.sort(key=lambda x: len(x), reverse=True)
             # fill in already defined defines
-            for key, value in defines.items():
-                line = line.replace(key, value)
+            for key in define_keys:
+                line = line.replace(key, defines[key])
             lines.append(line)
-    program_counter = 0
+    # Preliminary parsing for labels
+    program_counter = start_pc
+    labels = {}
+    preliminary_labels.sort(key=lambda x: len(x), reverse=True)
+    for line in lines:
+        if ":" in line:
+            label = line.split(":")[0].strip()
+            labels[label] = program_counter
+            line = line.split(":")[1].strip()
+            if line == "":
+                continue
+        for label in preliminary_labels:
+            line = line.replace(label, "0x7")
+        _, program_counter = parse_line(line, program_counter)
+    # Actual parsing
+    program_counter = start_pc
     instrs = []
+    label_keys = list(labels.keys())
+    label_keys.sort(key=lambda x: len(x), reverse=True)
+    lines_by_pc = {}
     for line in lines:
         prev_pc = program_counter
-        try:
-            instr, program_counter = DoubleOperandInstructionType.parse(line, program_counter)
-        except WrongInstructionError as e1:
-            try:
-                instr, program_counter = SingleOperandInstructionType.parse(line, program_counter)
-            except WrongInstructionError as e2:
-                try:
-                    instr, program_counter = JumpInstructionType.parse(line, program_counter)
-                except WrongInstructionError as e3:
-                    try:
-                        instr, program_counter = EmulatedInstructionType.parse(line, program_counter)
-                    except WrongInstructionError as e4:
-                        raise AssemblyError(f"Failed to parse instruction: {line}\nDoubleOperand: {e1}\nSingleOperand: {e2}\nJump: {e3}\nEmulated: {e4}")
+        lines_by_pc[prev_pc] = line
+        if ":" in line:
+            # label = line.split(":")[0].strip()
+            # labels[label] = program_counter
+            line = line.split(":")[1].strip()
+            if line == "":
+                continue
+        for label in label_keys:
+            addr = labels[label]
+            abs_addr = f"0x{addr:x}".replace("0x-", "-0x")
+            rel_addr = f"0x{addr - program_counter:x}".replace("0x-", "-0x")
+            # print(f"\n\n\n\nBefore: {line}")
+            line = line\
+                .replace(f"{label}(", f"{abs_addr}(")\
+                .replace(f"#{label}", f"#{abs_addr}")\
+                .replace(f"&{label}", f"&{abs_addr}")\
+                .replace(f"@{label}", f"{abs_addr}")\
+                .replace(label, rel_addr)
+            # print(f"After: {line}")
+        instr, program_counter = parse_line(line, program_counter)
         instrs.append((prev_pc, instr))
-        print(program_counter, instrs[-1])
+        if log_level >= 3:
+            print(program_counter, instrs[-1])
 
-    print("--------------------\nLines:")
-    print(lines)
-    print("--------------------\nDefines:")
-    print(defines)
-    print("--------------------\nBytecode:")
+    if log_level >= 2:
+        print("--------------------\nLines:")
+        print(lines)
+        print("--------------------\nDefines:")
+        print(defines)
+        print("--------------------\nLabels:")
+        print(labels)
+        for label, addr in labels.items():
+            print(f"{label}: 0x{addr:04x}")
+    if log_level >= 1:
+        print("--------------------\nBytecode:")
 #    byte_arrays = []
 #    for _, instr in instrs:
 #        byte_arrays.extend(instr.get_words())
@@ -746,20 +822,23 @@ def parse(lines_text: str) -> bytes:
 #        print(f"{bin_str} (0x{int(bin_str, 2):04x})")
     bytes_out = b""
     for pc, instr in instrs:
-        print(f"{pc:04x}:  ", end="")
         words = instr.get_words()
-        print(f"{to_int(words[0]):04x} ", end="")
-        if len(words) > 1:
-            print(f"{to_int(words[1]):04x} ", end="")
-            if len(words) > 2:
-                print(f"{to_int(words[2]):04x} ", end="")
+        if log_level >= 1:
+            print(f"{Fore.BLUE}{pc:04x}:  {Style.RESET_ALL}", end="")
+            print(f"{Fore.MAGENTA}{to_int(words[0]):04x} ", end="")
+            if len(words) > 1:
+                print(f"{to_int(words[1]):04x} ", end="")
+                if len(words) > 2:
+                    print(f"{to_int(words[2]):04x} ", end="")
+                else:
+                    print(" "*5, end="")
             else:
-                print(" "*5, end="")
-        else:
-            print(" "*10, end="")
+                print(" "*10, end="")
+            print(Style.RESET_ALL, end="")
+            print(Fore.LIGHTYELLOW_EX +instr.get_mnemonic().lower().ljust(12, " "), end="")
+            print(instr.get_args().ljust(20, " ")+Style.RESET_ALL, end="")
+            print("; "+lines_by_pc[pc])
         bytes_out += b"".join([u16_to_bytes(to_int(word)) for word in words])
-        print(instr.get_mnemonic().lower().ljust(12, " "), end="")
-        print(instr.get_args())
     return bytes_out
 
 
@@ -771,13 +850,25 @@ AdD #10 Test$Macro_1 ;comment
   ; more comments
 ; test weird upper+lowercase mixtures
 CmP #11 0(R10)
+MOV #test2, R5
 JmP -0x8
 PUsH.b @R5
 ; test emulated instructions
 DINT
 tst.B R10
 POP 0(R11)
-""")
+
+test_on_a_line:       ; and a comment
+
+
+
+test: PUSH #14
+PUSH #154
+test2: PUSH #241
+JMP test
+JMP test2
+MOV #-8, test2(R5)
+""", 0x4400, 2)
 
 with open("test.bin", "wb") as f:
     f.write(dat)

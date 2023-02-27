@@ -24,6 +24,9 @@ A line is ignored starting with the first ;
 A label may use these characters (but may not start with a number): (A-Z, a-z, 0-9, $, and _), and the end of a label is denoted by :
   a label can be on a line by itself, in which case it won't increase the address counter, or at the start of a line.
   in final assembly, references to labels will be replaced with the address of the line they reference (allows creating named functions)
+  label replacement is handled as such:
+  if a label is referenced as label(Rn), #label, &label, or @label, the label will be replaced with the absolute address of the label - note that for @label, the '@' is removed
+  if a label is referenced in any other way, it will be replaced with the relative address of the label (label - current address) - this is for jump-type instructions
 
 a symbol can be defined using the syntax
   .define "R5", AMacro0_$1_is_cool
