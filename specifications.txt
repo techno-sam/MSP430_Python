@@ -17,6 +17,8 @@ Address Space:
 
 recommend 0x0200 - 0x4400 dedicated to call stack
 
+code starts at 0x4400
+
 directives, labels, and comments:
 
 A line is ignored starting with the first ;

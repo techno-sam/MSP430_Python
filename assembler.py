@@ -46,29 +46,19 @@ def to_int(array: bytearray) -> int:
     return int(bytearray_to_bin_str(array), 2)
 
 
-def signed_bin(num: int, count: int) -> str:
+def signed_bin(num: int, count: int, unsigned: bool = False) -> str:
+    full_ones = eval("0b" + "1"*count)
     if num >= 0:
-        prefix = "0"
         bin_str = bin(num).replace("0b", "")
+    elif not unsigned:
+        bin_str = bin(abs(num+1)^full_ones).replace("0b", "")
     else:
-        prefix = "1"
-        bin_str = bin(num+1).replace("0b", "").replace("-", "")
-    return prefix + (count - len(prefix+bin_str))*"0" + bin_str
+        raise AssemblyError("Negative number cannot be interpreted as unsigned")
+    return (count - len(bin_str))*"0" + bin_str
 
 
 def fill_num(num: int, array: bytearray, unsigned: bool = False):
-    if num >= 0:
-        prefix = "0"
-        bin_str = bin(num).replace("0b", "")
-    else:
-        prefix = "1"
-        bin_str = bin(num+1).replace("0b", "").replace("-", "")
-    if unsigned:
-        prefix = ""
-        if num < 0:
-            raise AssemblyError("Negative number cannot be interpreted as unsigned")
-    bin_str = prefix + (len(array) - len(prefix+bin_str))*"0" + bin_str
-    fill(bin_str, array)
+    fill(signed_bin(num, len(array), unsigned=unsigned), array)
 
 
 def fill(bin_str: str, array: bytearray):
@@ -288,6 +278,7 @@ class SingleOperandInstruction(Instruction):
         ins[9] = byte_mode
         ins[10:12] = src.ad_long
         ins[12:16] = src.reg_4bit
+        self.words.extend(src.extra_words)
 
     def get_words(self) -> list[bytearray]:
         return self.words
@@ -434,7 +425,16 @@ class JumpInstructionType(InstructionType):
             if sign == "-":
                 offset = -offset
                 orig_offset = "-" + orig_offset
-            return JumpInstruction(JumpInstructionType.ALL[mnemonic], signed_bin(offset, 10), orig_mnemonic, orig_offset), program_counter
+            offset -= 2
+            offset /= 2
+            if offset % 1 != 0:
+                raise AssemblyError("Invalid jump offset: must be even")
+            offset = int(offset)
+            if offset > 512 or offset < -511:
+                raise AssemblyError("Invalid jump offset: must be between -511 and 512 words")
+            if offset < 0:
+                offset += 1024
+            return JumpInstruction(JumpInstructionType.ALL[mnemonic], signed_bin(offset, 10, True), orig_mnemonic, orig_offset), program_counter
         else:
             raise WrongInstructionError("Invalid jump instruction")
 
@@ -704,7 +704,7 @@ def parse_line(line: str, program_counter: int) -> tuple[Instruction, int]:
                     instr, program_counter = EmulatedInstructionType.parse(line, program_counter)
                 except WrongInstructionError as e4:
                     raise AssemblyError(
-                        f"Failed to parse instruction: {line}\nDoubleOperand: {e1}\nSingleOperand: {e2}\nJump: {e3}\nEmulated: {e4}")
+                        f"Failed to parse instruction: {line}\nDoubleOperand: {e1}\nSingleOperand: {e2}\nJump: {e3}\nEmulated: {e4}") from None
     return instr, program_counter
 
 
@@ -767,7 +767,7 @@ def parse(lines_text: str, start_pc: int = 0, log_level: int = 1) -> bytes:
             if line == "":
                 continue
         for label in preliminary_labels:
-            line = line.replace(label, "0x7")
+            line = line.replace(label, "0xa")
         _, program_counter = parse_line(line, program_counter)
     # Actual parsing
     program_counter = start_pc
@@ -863,12 +863,18 @@ test_on_a_line:       ; and a comment
 
 
 
+jmp test
 test: PUSH #14
 PUSH #154
 test2: PUSH #241
 JMP test
 JMP test2
 MOV #-8, test2(R5)
+and.b #-0x1, r5
+jmp 0x10 ; this outputs correctly, original would have been jmp 0x10 -> to get from input to correct, use this formula: (original - 2) / 2 --> then convert to signed
+SWPB R5
+and.b #-0x1, 25(r5)
+cmp #0x8, r7
 """, 0x4400, 2)
 
 with open("test.bin", "wb") as f:
