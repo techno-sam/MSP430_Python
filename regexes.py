@@ -4,6 +4,7 @@
 UNSIGNED_NUMBER = r"^(?:(?:0[xX](?P<hex>[0-9a-fA-F]{1,4}))|(?P<digits>\d+))$"
 SIGN = r"(?P<sign>[-+])?"
 LABEL = r"^([A-z$_][A-z0-9$_]*)$"
+MNEMONIC_EXTRACTION = r"^(?P<mnemonic>[^\s]+)(?P<rest>\s.*)?$"
 
 #############
 # Registers #

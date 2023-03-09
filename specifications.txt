@@ -19,6 +19,19 @@ recommend 0x0200 - 0x4400 dedicated to call stack
 
 code starts at 0x4400
 
+CPU special features:
+Uses software interrupts from microcorruption (https://microcorruption.com/public/manual.pdf)
+Described as such:
+    Lockitall has extended the MSP430 to support software interrupts, imple-
+    mented with a callgate at address 0x0010 on the MCU. When the CPU
+    executes the instruction at this address, the CPU begins executing special-
+    purpose LockIT Pro code to perform special-purpose functions, such as print-
+    ing characters to the console, or requesting terminal input. The interrupt kind
+    is passed in R2, the status register, on the high byte. Arguments are passed
+    on the stack.
+    The interrupts are described in detail in Section 4.
+Interrupt 0x00 - putchar - works using utf-8, outputting 8 bits at a time
+
 directives, labels, and comments:
 
 A line is ignored starting with the first ;

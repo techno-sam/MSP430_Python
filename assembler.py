@@ -645,6 +645,7 @@ def e(emulated: str, fmt: str) -> EmulatedInstructionType:
     :param fmt: something like DADD.x #0,dst
     :return: built type
     """
+    instructions.append(emulated.replace(".x", ""))
     return EmulatedInstructionType(emulated.replace(".x", "").replace(" dst", ""),
                                    "dst" in emulated,
                                    ".x" in emulated,
@@ -687,7 +688,7 @@ for emulated_instruction in emulated_instructions.split("\n"):
 def u16_to_bytes(i: int) -> bytes:
     high = (i >> 8) & 0xFF
     low = i & 0xFF
-    return bytes([low, high])
+    return bytes([high, low])
 
 
 def parse_line(line: str, program_counter: int) -> tuple[Instruction, int]:
@@ -767,7 +768,20 @@ def parse(lines_text: str, start_pc: int = 0, log_level: int = 1) -> bytes:
             if line == "":
                 continue
         for label in preliminary_labels:
-            line = line.replace(label, "0xa")
+            potential_issue = False
+            for instr in instructions:
+                if label.lower() in instr.lower():
+                    potential_issue = True
+                    break
+            if potential_issue:
+                mnemonic, rest = re.match(regexes.MNEMONIC_EXTRACTION, line, re.IGNORECASE).groups()
+                mnemonic: str
+                rest: str
+                rest = rest or ""
+                rest = rest.replace(label, "0xa")
+                line = mnemonic + rest
+            else:
+                line = line.replace(label, "0xa")
         _, program_counter = parse_line(line, program_counter)
     # Actual parsing
     program_counter = start_pc
@@ -789,12 +803,25 @@ def parse(lines_text: str, start_pc: int = 0, log_level: int = 1) -> bytes:
             abs_addr = f"0x{addr:x}".replace("0x-", "-0x")
             rel_addr = f"0x{addr - program_counter:x}".replace("0x-", "-0x")
             # print(f"\n\n\n\nBefore: {line}")
-            line = line\
-                .replace(f"{label}(", f"{abs_addr}(")\
-                .replace(f"#{label}", f"#{abs_addr}")\
-                .replace(f"&{label}", f"&{abs_addr}")\
-                .replace(f"@{label}", f"{abs_addr}")\
-                .replace(label, rel_addr)
+            potential_issue = False
+            for instr in instructions:
+                if label in instr:
+                    potential_issue = True
+                    break
+            line = line \
+                .replace(f"{label}(", f"{abs_addr}(") \
+                .replace(f"#{label}", f"#{abs_addr}") \
+                .replace(f"&{label}", f"&{abs_addr}") \
+                .replace(f"@{label}", f"{abs_addr}")
+            if potential_issue:
+                mnemonic, rest = re.match(regexes.MNEMONIC_EXTRACTION, line, re.IGNORECASE).groups()
+                mnemonic: str
+                rest: str
+                rest = rest or ""
+                rest = rest.replace(label, rel_addr)
+                line = mnemonic + rest
+            else:
+                line = line.replace(label, rel_addr)
             # print(f"After: {line}")
         instr, program_counter = parse_line(line, program_counter)
         instrs.append((prev_pc, instr))
@@ -837,7 +864,17 @@ def parse(lines_text: str, start_pc: int = 0, log_level: int = 1) -> bytes:
             print(Style.RESET_ALL, end="")
             print(Fore.LIGHTYELLOW_EX +instr.get_mnemonic().lower().ljust(12, " "), end="")
             print(instr.get_args().ljust(20, " ")+Style.RESET_ALL, end="")
-            print("; "+lines_by_pc[pc])
+            print("; "+lines_by_pc[pc], end="")
+            already_did_heading = False
+            for label, addr in labels.items():
+                if pc == addr:
+                    if already_did_heading:
+                        print(", ", end="")
+                    else:
+                        print(f"{Fore.LIGHTGREEN_EX}  ; LABELS: ", end="")
+                        already_did_heading = True
+                    print(label, end="")
+            print()
         bytes_out += b"".join([u16_to_bytes(to_int(word)) for word in words])
     return bytes_out
 
@@ -847,12 +884,48 @@ dat = parse("""
 MOV #0x4400, SP
 .define "R6", Test$Macro_1
 AdD #10 Test$Macro_1 ;comment
+
+
+; test putchar
+mov #0xe2, r15
+call #putchar
+mov #0x9d, r15
+call #putchar
+mov #0xa4, r15
+call #putchar
+
+mov #0xef, r15
+call #putchar
+mov #0xb8, r15
+call #putchar
+mov #0x8f, r15
+call #putchar
+
+;mov #0xc17d, r15
+mov #0xa1, r15
+call #putuc16
+
+mov #0x09a0, r15
+call #putuc16
+
+mov #0x42, r15
+call #putuc16
+
+MOV #72, r15
+MOV #0, r15
+mov #0xc17b, r15
+print_loop: ADD.b #1, r15
+call #putuc16
+jmp print_loop
+
 ; a comment
   ; more comments
 ; test weird upper+lowercase mixtures
-CmP #11 0(R10)
+loop: CmP #11 0(R10)
 MOV #test2, R5
-JmP -0x8
+push #0x1234
+;JmP -0x8
+jmp loop
 PUsH.b @R5
 ; test emulated instructions
 DINT
@@ -875,7 +948,134 @@ jmp 0x10 ; this outputs correctly, original would have been jmp 0x10 -> to get f
 SWPB R5
 and.b #-0x1, 25(r5)
 cmp #0x8, r7
+
+
+; higher-level utility functions
+; <putuc16> - send unicode codepoint (16-bit) to console
+putuc16:
+; input: r15
+; if the codepoint is greater than U+007F, we need two passes, and if it's greater than U+07FF, we need three passes
+; handle one-pass case first
+; store r13, r14 and r15 on stack
+push    r13
+push    r14
+push    r15
+; check if codepoint is greater than U+007F
+bit     #0xff80, r15
+jc      putuc16_2pass
+; if not, we can just send it directly
+call    #putchar
+; restore r14 and r15 from stack
+putuc16_cleanup:
+pop     r15
+pop     r14
+pop     r13
+ret
+; handle two-pass case
+putuc16_2pass:
+; check if codepoint is greater than U+07FF
+bit     #0xf800, r15
+jc      putuc16_3pass
+; if not, we need two passes
+; done like this: 110xxxxx 10xxxxxx
+; put 6 bits in r14
+mov     r15, r14
+and     #0x3f, r14
+; put in 10 header
+bis     #0x80, r14
+; shift r15 right 6 bits
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+; set 110 header in r15
+and     #0x1f, r15
+bis     #0xc0, r15
+; send high
+push    r14
+call    #putchar
+pop     r14
+; send low
+mov     r14, r15
+call    #putchar
+jmp     putuc16_cleanup
+; handle three-pass case
+putuc16_3pass:
+; done like this: 1110xxxx 10xxxxxx 10xxxxxx
+; 1110xxxx in r15 (bits 12-15)
+; 10xxxxxx in r14 (bits 6-11)
+; 10xxxxxx in r13 (bits 0-5)
+mov     r15, r14
+mov     r15, r13
+; setup r13
+and     #0x3f, r13
+bis     #0x80, r13
+; setup r14
+; must shift r14 right 6 bits
+rra     r14
+rra     r14
+rra     r14
+rra     r14
+rra     r14
+rra     r14
+and     #0x3f, r14
+bis     #0x80, r14
+; setup r15
+; must shift r15 right 12 bits
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+rra     r15
+and     #0x0f, r15
+bis     #0xe0, r15
+; send high
+push    r14
+call    #putchar
+pop     r14
+; send middle
+mov     r14, r15
+call    #putchar
+; send low
+mov     r13, r15
+call    #putchar
+jmp     putuc16_cleanup
+
+; utility functions
+; <INT> - send an interrupt
+INT:
+mov     0x2(sp), r14
+push    sr
+mov     r14, r15
+swpb    r15
+mov     r15, sr
+bis     #0x8000, sr ; set highest bit of sr to 1
+call    #0x10
+pop     sr
+ret
+
+; <putchar> - send single character to console
+putchar:
+decd    sp
+push    r15
+push    #0x0 ; interrupt type
+mov     r15, 0x4(sp)
+call    #INT
+mov     0x4(sp), r15
+add     #0x6, sp
+ret
+
 """, 0x4400, 2)
 
 with open("test.bin", "wb") as f:
+    f.write(b"\x44\x00")
     f.write(dat)

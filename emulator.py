@@ -108,6 +108,18 @@ class StackPointerRegister(Register):
         if self.get_word() % 2 != 0:
             raise ExecutionError("Stack pointer must be word-aligned")
 
+    def set_word(self, value: int, signed: bool = False):
+        try:
+            return super().set_word(value, signed)
+        except ExecutionError:
+            raise ExecutionError("Stack overflow")
+
+    def set_byte(self, value: int, signed: bool = False):
+        try:
+            return super().set_byte(value, signed)
+        except ExecutionError:
+            raise ExecutionError("Stack overflow")
+
 
 class StatusRegister(Register):
     def __init__(self):
@@ -200,6 +212,9 @@ class MemoryMap:
     def __init__(self, size: int):
         self._memory = [0] * size
 
+    def __len__(self):
+        return len(self._memory)
+
     def __getitem__(self, item):
         """
         if slice step is "b", return sequence of bytes, otherwise return sequence (or single) word
@@ -213,6 +228,8 @@ class MemoryMap:
                 ret = [(ret[i] << 8) + ret[i+1] for i in range(0, len(ret), 2)]
             else:
                 raise IndexError("Invalid memory address mode")
+            if 0 > item.start or item.start > len(self._memory) or 0 > item.stop or item.stop > len(self._memory):
+                raise ExecutionError(f"Out of bounds memory access (0x{item.start:04x} - 0x{item.stop:04x}) (bounds 0x0000 - 0x{len(self._memory):04x})")
             if len(ret) == 1:
                 ret = ret[0]
             return ret
@@ -278,6 +295,14 @@ class WriteTarget:
         raise NotImplementedError
 
 
+class VoidWriteTarget(WriteTarget):
+    def set_byte(self, val: int, signed: bool = False):
+        pass
+
+    def set_word(self, val: int, signed: bool = False):
+        pass
+
+
 class RegisterWriteTarget(WriteTarget):
     def __init__(self, register: Register):
         self.register = register
@@ -326,6 +351,15 @@ class Computer:
 
         self.memory = MemoryMap(0x10000) # 64KB of memory (addresses 0x0000 to 0xffff)
 
+        self.silent = False
+        self.input_function = lambda: input("program input: ")
+        self.output_function = print
+        self._output_buffer = b""
+
+    def print(self, *args, **kwargs):
+        if not self.silent:
+            print(*args, **kwargs)
+
     def setup_register_vars(self):
         self.pc: ProgramCounterRegister = self.registers[0] # noqa
         self.sp: StackPointerRegister = self.registers[1] # noqa
@@ -347,6 +381,13 @@ class Computer:
         self.r13: Register = self.registers[13] # noqa
         self.r14: Register = self.registers[14] # noqa
         self.r15: Register = self.registers[15] # noqa
+
+    def reset(self):
+        for i in range(16):
+            self.registers[i].set(b"\x00\x00")
+        for i in range(len(self.memory)):
+            self.memory[i] = 0
+        self._output_buffer = b""
 
     def get_byte(self, addr: int, signed: bool = False) -> int:
         val = self.memory[addr:addr+1]
@@ -396,17 +437,83 @@ class Computer:
                 line2 += name
             else:
                 line2 += "_"
-        print("\n\nStatus:")
-        print(line1)
-        print(line2)
-        print("\n\n")
+        self.print("\n\nStatus:")
+        self.print(line1)
+        self.print(line2)
+        self.print("\n\n")
 
     def step(self):
         # Read opcode from pc, increment pc, execute operation
-        instruction = self.get_word(self.pc.get_word())
-        self.pc.set_word(self.pc.get_word() + 2)
-        self._execute(instruction)
-        self.print_status()
+        if self.pc.get_word() == 0x10:
+            self.print("Special case software interrupt")
+
+            interrupt_kind = self.sr.get_word() >> 8 & 0b0111_1111 # only uses 7 bits for interrupts (max 127)
+
+            if interrupt_kind == 0x00:
+                self.print("putchar")
+                char_val = self.get_word(self.sp.get_word() + 8) & 0xff
+                self.print("sp", self.sp.get_word())
+#                self.sp.set_word(self.sp.get_word() + 2)
+                if char_val >> 7: # continuation byte
+                    self._output_buffer += bytes([char_val])
+                    # check if we have a full utf-8 char
+                    if len(self._output_buffer) != 0:
+                        expected_len = bin(self._output_buffer[0]>>4).replace("0b", "").count("1")
+                        if len(self._output_buffer) > expected_len:
+                            print(f"Error: buffer too long: {self._output_buffer}")
+                            self._output_buffer = b""
+                    try:
+                        character = self._output_buffer.decode("utf-8")
+                        if len(self._output_buffer) != expected_len:
+                            print(f"Very bad: {self._output_buffer} resolves with the wrong length")
+                    except UnicodeDecodeError as e:
+                        if len(self._output_buffer) == expected_len:
+                            print(f"Very bad: {self._output_buffer} fails to resolve with the correct length, error: {e}")
+                            self._output_buffer = b""
+#                        print(f"Error decoding utf-8: {e}, buffer: {self._output_buffer}")
+                        character = None
+                    if character is not None:
+                        # print(f"output_buffer: {self._output_buffer}")
+                        self.output_function(character, end="")
+                        self._output_buffer = b""
+                else:
+                    self.output_function(chr(char_val), end="")
+            elif interrupt_kind == 0x01:
+                raise ExecutionError("No clean way to get a single char yet")
+            elif interrupt_kind == 0x02:
+                print("gets")
+                sp = self.sp.get_word()
+                dst = self.get_word(sp + 6)
+                max_len = self.get_word(sp + 8)
+                string = self.input_function()[:max_len]
+
+                for i, v in enumerate(string):
+                    self.memory[dst + i] = ord(v)
+                self.memory[dst + len(string)] = 0
+            elif interrupt_kind == 0x10:
+                raise ExecutionError("DEP interrupt not implemented")
+            elif interrupt_kind == 0x11:
+                raise ExecutionError("DEP set interrupt not implemented")
+            elif interrupt_kind == 0x20:
+                raise ExecutionError("rand not yet implemented")
+            elif interrupt_kind == 0x7d:
+                raise ExecutionError("This isn't a LockIT, silly!")
+            elif interrupt_kind == 0x7e:
+                raise ExecutionError("This isn't a LockIT, silly!")
+            elif interrupt_kind == 0x7f:
+                raise ExecutionError("This isn't a LockIT, silly!")
+            else:
+                raise ExecutionError(f"Invalid interrupt kind {interrupt_kind}")
+
+            # go back to normal execution
+            self.pc.set_word(self.pc.get_word() + 2)
+            # self._execute(0x4130) # ret
+            self._execute(0x4130) # ret
+        else:
+            instruction = self.get_word(self.pc.get_word())
+            self.pc.set_word(self.pc.get_word() + 2)
+            self._execute(instruction)
+            self.print_status()
 
     def _execute(self, instruction: int):
         # Execute a single TI MSP430 16-bit instruction
@@ -418,52 +525,52 @@ class Computer:
         # check biggest 3 bits for jump, then check biggest 6 bits for single-operand
         instruction &= 0xffff
         if instruction >> 13 == 0b001:
-            print("It is a jump instruction")
+            self.print("It is a jump instruction")
             self._execute_jump(instruction)
         elif instruction >> 10 == 0b000100:
-            print("It is a single-operand instruction")
+            self.print("It is a single-operand instruction")
             self._execute_single_operand(instruction)
         else:
-            print("It is a double-operand instruction")
+            self.print("It is a double-operand instruction")
             self._execute_double_operand(instruction)
 
     def _execute_jump(self, instruction: int):
-        print("Jump instruction:", hex(instruction))
+        self.print("Jump instruction:", hex(instruction))
         # decode target (lowest 10 bits)
         offset = (instruction & 0b1111111111)
         if offset > 512:
             offset -= 1024
         condition = (instruction >> 10) & 0b111
         if condition == 0b000:   # JNE/JNZ
-            print("JNE/JNZ")
+            self.print("JNE/JNZ")
             if self.sr.z:
                 return
         elif condition == 0b001: # JEQ/JZ
-            print("JEQ/JZ")
+            self.print("JEQ/JZ")
             if not self.sr.z:
                 return
         elif condition == 0b010: # JNC/JLO
-            print("JNC/JLO")
+            self.print("JNC/JLO")
             if self.sr.c:
                 return
         elif condition == 0b011: # JC/JHS
-            print("JC/JHS")
+            self.print("JC/JHS")
             if not self.sr.c:
                 return
         elif condition == 0b100: # JN
-            print("JN")
+            self.print("JN")
             if not self.sr.n:
                 return
         elif condition == 0b101: # JGE
-            print("JGE")
+            self.print("JGE")
             if self.sr.n ^ self.sr.v:
                 return
         elif condition == 0b110: # JL
-            print("JL")
+            self.print("JL")
             if not (self.sr.n ^ self.sr.v):
                 return
         elif condition == 0b111: # JMP - done
-            print("JMP")
+            self.print("JMP")
         else:
             raise ExecutionError("Invalid jump instruction")
         self.pc.set_word(self.pc.get_word() + offset * 2)
@@ -487,7 +594,10 @@ class Computer:
                     src = 2
                 elif as_ == 0b11:
                     src = 0xff if bw else 0xffff
-            return src
+            if output_write_target:
+                return src, VoidWriteTarget()
+            else:
+                return src
         if as_ == 0b00:
             if bw:
                 src = self.registers[src_reg].get_byte()
@@ -496,6 +606,7 @@ class Computer:
             wt = RegisterWriteTarget(self.registers[src_reg])
         elif as_ == 0b01:
             offset = self.get_word(self.pc.get_word()) + self.registers[src_reg].get_word()  # noqa
+            offset &= 0xffff
             self.pc.set_word(self.pc.get_word() + 2)
             if bw:
                 src = self.get_byte(offset)
@@ -526,7 +637,7 @@ class Computer:
             return src
 
     def _execute_single_operand(self, instruction: int): # PUSH implementation: decrement SP, then execute as usual
-        print("Single-operand instruction:", hex(instruction))
+        self.print("Single-operand instruction:", hex(instruction))
         opcode = (instruction >> 7) & 0b111 # 3-bit
         src_reg = instruction & 0b1111 # 4-bit
         as_ = (instruction >> 4) & 0b11 # 2-bit
@@ -536,32 +647,33 @@ class Computer:
         src, wt = self._get_src(src_reg, as_, bw, True)
         src: int
         wt: WriteTarget
-        print("src:", src)
+        self.print("src:", src)
 
         no_write = False
 
         # apply operation
         if opcode == 0b000: # RRC
-            print("RRC")
+            self.print("RRC")
             # implement rotate right through carry
-            self.sr.carry = src & 0b1 == 1
+            goal_carry = src & 0b1 == 1
             src >>= 1
             # put carry back in, taking into account byte-mode as bw
             if bw:
                 src |= (self.sr.carry << 7)
             else:
                 src |= (self.sr.carry << 15)
+            self.sr.carry = goal_carry
             self.sr.n = (src >> (7 if bw else 15) & 1) == 1
             self.sr.z = src == 0
             self.sr.v = False
         elif opcode == 0b001: # SWPB
-            print("SWPB")
+            self.print("SWPB")
             # swap bytes
             if bw:
                 raise ExecutionError("SWPB cannot be used in byte mode")
             src = ((src & 0xff00) >> 8) | ((src & 0xff) << 8)
         elif opcode == 0b010: # RRA
-            print("RRA")
+            self.print("RRA")
             self.sr.c = src & 0b1 == 1
             msb_to_or = src & (128 if bw else 32768)
             src >>= 1
@@ -570,7 +682,7 @@ class Computer:
             self.sr.n = src == 0
             self.v = False
         elif opcode == 0b011: # SXT
-            print("SXT")
+            self.print("SXT")
             if bw:
                 raise ExecutionError("SXT cannot be used in byte mode")
             src &= 0xff
@@ -583,7 +695,7 @@ class Computer:
             self.sr.c = src != 0
             self.sr.v = False
         elif opcode == 0b100: # PUSH
-            print("PUSH")
+            self.print("PUSH")
             self.sp.set_word(self.sp.get_word() - 2)
             if isinstance(wt, RegisterWriteTarget) and wt.register == self.pc:
                 if bw:
@@ -596,7 +708,7 @@ class Computer:
             else:
                 self.set_word(self.sp.get_word(), src)
         elif opcode == 0b101: # CALL
-            print("CALL")
+            self.print("CALL")
             if bw:
                 raise ExecutionError("CALL cannot be used in byte mode")
             self.sp.set_word(self.sp.get_word() - 2)
@@ -604,7 +716,7 @@ class Computer:
             self.pc.set_word(src)
             no_write = True
         elif opcode == 0b110: # RETI
-            print("RETI")
+            self.print("RETI")
             raise NotImplementedError("RETI is not implemented, because interrupts don't exist")
         else:
             raise ExecutionError("Invalid single-operand opcode")
@@ -625,7 +737,7 @@ class Computer:
                     (prev_dst >> (7 if byte_mode else 15) & 1) != (dst >> (7 if byte_mode else 15) & 1))
 
     def _execute_double_operand(self, instruction: int):  # MOV order: read value, increment if needed, set value
-        print("Double-operand instruction:", hex(instruction))
+        self.print("Double-operand instruction:", hex(instruction))
         opcode = instruction >> 12 # 4-bit
         src_reg = instruction >> 8 & 0b1111 # 4-bit
         ad = instruction >> 7 & 0b1 # 1-bit
@@ -636,7 +748,7 @@ class Computer:
         # read source
         src: int = self._get_src(src_reg, as_, bw)
 
-        print(src)
+        self.print(src)
         # read value of dst and make a WriteTarget
         if ad == 0b0:
             if bw:
@@ -646,6 +758,7 @@ class Computer:
             wt = RegisterWriteTarget(self.registers[dst_reg])
         elif ad == 0b1:
             offset = self.get_word(self.pc.get_word()) + self.registers[dst_reg].get_word()  # noqa
+            offset &= 0xffff
             self.pc.set_word(self.pc.get_word() + 2)
             if bw:
                 dst = self.get_byte(offset)
@@ -654,54 +767,57 @@ class Computer:
             wt = MemoryWriteTarget(offset, self)
         else:
             raise ExecutionError("Invalid addressing destination mode")
-        print("dst:", dst, "wt:", wt)
+        self.print("dst:", dst, "wt:", wt)
+
+        no_write = False
 
         # apply operation
 #        print("Totally executing opcode", hex(opcode), bin(opcode))
         if opcode == 0b0100:  # MOV - done
-            print("MOV")
+            self.print("MOV")
             dst = src
         elif opcode == 0b0101:  # ADD - done
-            print("ADD")
+            self.print("ADD")
             prev_dst = dst
             dst += src
             dst_full = dst
             dst = dst & (0xff if bw else 0xffff)
             self._set_flags(src, prev_dst, dst_full, dst, bw)
         elif opcode == 0b0110:  # ADDC - done
-            print("ADDC")
+            self.print("ADDC")
             prev_dst = dst
             dst += src + self.sr.carry
             dst_full = dst
             dst = dst & (0xff if bw else 0xffff)
             self._set_flags(src, prev_dst, dst_full, dst, bw)
         elif opcode == 0b0111:  # SUBC - done
-            print("SUBC")
+            self.print("SUBC")
             prev_dst = dst
             dst = dst - src - 1 + self.sr.carry
             dst_full = dst
             dst = dst & (0xff if bw else 0xffff)
             self._set_flags(src, prev_dst, dst_full, dst, bw)
         elif opcode == 0b1000:  # SUB - done
-            print("SUB")
+            self.print("SUB")
             prev_dst = dst
             dst -= src
             dst_full = dst
             dst = dst & (0xff if bw else 0xffff)
             self._set_flags(src, prev_dst, dst_full, dst, bw)
         elif opcode == 0b1001:  # CMP - done
-            print("CMP")
+            self.print("CMP")
             # do like SUB but use fake_dst instead of writing to dst
             prev_dst = dst
             fake_dst = dst - src
             dst_full = fake_dst
             fake_dst = fake_dst & (0xff if bw else 0xffff)
             self._set_flags(src, prev_dst, dst_full, fake_dst, bw)
+            no_write = True
         elif opcode == 0b1010:  # DADD
-            print("DADD")
+            self.print("DADD")
             raise NotImplementedError("DADD")
         elif opcode == 0b1011:  # BIT - done
-            print("BIT")
+            self.print("BIT")
             #don't actually place in destination
             prev_dst = dst
             fake_dst = dst & src
@@ -710,14 +826,15 @@ class Computer:
             self._set_flags(src, prev_dst, dst_full, fake_dst, bw)
             self.sr.c = not self.sr.zero
             self.sr.v = False
+            no_write = True
         elif opcode == 0b1100:  # BIC - done
-            print("BIC")
+            self.print("BIC")
             dst &= ~src
         elif opcode == 0b1101:  # BIS - done
-            print("BIS")
+            self.print("BIS")
             dst |= src
         elif opcode == 0b1110:  # XOR - done
-            print("XOR")
+            self.print("XOR")
             prev_dst = dst
             dst ^= src
             self.sr.n = (dst >> (7 if bw else 15) & 1) == 1
@@ -726,7 +843,7 @@ class Computer:
             # src.v if src and prev_dst are negative
             self.sr.v = (src >> (7 if bw else 15) & 1) == 1 and (prev_dst >> (7 if bw else 15) & 1) == 1
         elif opcode == 0b1111:  # AND - done
-            print("AND")
+            self.print("AND")
             dst &= src
             self.sr.n = (dst >> (7 if bw else 15) & 1) == 1
             self.sr.z = dst == 0
@@ -736,27 +853,29 @@ class Computer:
             raise ExecutionError("Invalid double-operand opcode")
 
         # write value to dst
-        if bw:
-            wt.set_byte(dst)
-        else:
-            wt.set_word(dst)
+        if not no_write:
+            if bw:
+                wt.set_byte(dst)
+            else:
+                wt.set_word(dst)
 
 
-c = Computer()
-# load in a jump, single-operand, and a double-operand instruction
-c.memory[0x0000:0x0002] = 0x3c07 # jmp         0x10
-c.memory[0x0010:0x0012] = 0x1085 # swpb        R5
-c.memory[0x0012:0x0014] = 0xf375 # and.b       #-0x1, r5
-c.memory[0x0014:0x0016] = 0xf3f5 # and.b       #-0x1, 25(r5) ; 1st word (has 1 extension word)
-c.memory[0x0016:0x0018] = 0x0019 # and.b       #-0x1, 25(r5) ; 2nd word (extension word)
-c.memory[0x0018:0x001a] = 0x9237 # cmp         #0x8, r7
-c.step()
-print(c.pc.get_word())
-c.step()
-print(c.pc.get_word())
-c.step()
-print(c.pc.get_word())
-c.step()
-print(c.pc.get_word())
-c.step()
-print(c.pc.get_word())
+if __name__ == "__main__":
+    c = Computer()
+    # load in a jump, single-operand, and a double-operand instruction
+    c.memory[0x0000:0x0002] = 0x3c07 # jmp         0x10
+    c.memory[0x0010:0x0012] = 0x1085 # swpb        R5
+    c.memory[0x0012:0x0014] = 0xf375 # and.b       #-0x1, r5
+    c.memory[0x0014:0x0016] = 0xf3f5 # and.b       #-0x1, 25(r5) ; 1st word (has 1 extension word)
+    c.memory[0x0016:0x0018] = 0x0019 # and.b       #-0x1, 25(r5) ; 2nd word (extension word)
+    c.memory[0x0018:0x001a] = 0x9237 # cmp         #0x8, r7
+    c.step()
+    print(c.pc.get_word())
+    c.step()
+    print(c.pc.get_word())
+    c.step()
+    print(c.pc.get_word())
+    c.step()
+    print(c.pc.get_word())
+    c.step()
+    print(c.pc.get_word())
